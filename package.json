@@ -2,8 +2,8 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "web": "expo start --web",
     "deploy": "npx expo export -p web && npx eas-cli@latest deploy"
   },
@@ -15,6 +15,7 @@
     "expo-router": "~6.0.0",
     "expo-splash-screen": "~31.0.8",
     "expo-status-bar": "~3.0.7",
+    "gl-matrix": "^3.4.4",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.4",

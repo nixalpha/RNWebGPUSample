@@ -10,6 +10,12 @@
       "expo-router"
     ],
     "name": "WebGPUSample",
-    "slug": "WebGPUSample"
+    "slug": "WebGPUSample",
+    "android": {
+      "package": "com.wa2goose.WebGPUSample"
+    },
+    "ios": {
+      "bundleIdentifier": "com.wa2goose.WebGPUSample"
+    }
   }
 }

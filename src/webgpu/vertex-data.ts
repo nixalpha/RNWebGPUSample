@@ -1,55 +1,46 @@
-export const getSphereData = (
+import { vec3 } from "gl-matrix";
+
+export const getSpherePosition = (
   radius: number,
-  latSegments: number,
-  lonSegments: number,
-) => {
+  theta: number,
+  phi: number,
+): vec3 => {
+  let x = radius * Math.sin(theta) * Math.cos(phi);
+  let y = radius * Math.cos(theta);
+  let z = -radius * Math.sin(theta) * Math.sin(phi);
+  return vec3.fromValues(x, y, z);
+};
+
+export const getSphereData = (radius: number, u: number, v: number) => {
   const pts: number[] = [];
-  const normals: number[] = [];
-  const uvs: number[] = [];
+
   const indices: number[] = [];
-  const lineIndices: number[] = [];
 
-  const rowSize = lonSegments + 1;
+  const row = v + 1;
 
-  for (let i = 0; i <= latSegments; i++) {
-    const v = i / latSegments;
-    const theta = v * Math.PI;
-    const sinTheta = Math.sin(theta);
-    const cosTheta = Math.cos(theta);
+  for (let i = 0; i <= u; i++) {
+    const theta = (i * Math.PI) / u;
 
-    for (let j = 0; j <= lonSegments; j++) {
-      const u = j / lonSegments;
-      const phi = u * 2 * Math.PI;
+    for (let j = 0; j <= v; j++) {
+      const phi = (j * 2 * Math.PI) / v;
 
-      // 1. Calculate Unit Vector (Normal)
-      const x = sinTheta * Math.cos(phi);
-      const y = cosTheta;
-      const z = -sinTheta * Math.sin(phi);
+      pts.push(...getSpherePosition(radius, theta, phi));
 
-      // 2. Push Vertex Attributes
-      normals.push(x, y, z);
-      pts.push(x * radius, y * radius, z * radius);
-      uvs.push(u, v);
+      if (i < u && j < v) {
+        const idx = j + i * row;
 
-      // 3. Generate Indices (Skip the last row and last column)
-      if (i < latSegments && j < lonSegments) {
-        const curr = j + i * rowSize;
-        const next = curr + rowSize;
-
-        // Triangles (Two per quad)
-        indices.push(curr, curr + 1, next + 1, next + 1, next, curr);
-
-        // Lines (Grid/Wireframe)
-        lineIndices.push(curr, curr + 1, curr, next);
+        indices.push(
+          idx,
+          idx + 1,
+          idx,
+          idx + row,
+        );
       }
     }
   }
 
   return {
     positions: new Float32Array(pts),
-    normals: new Float32Array(normals),
-    uvs: new Float32Array(uvs),
     indices: new Uint32Array(indices),
-    lineIndices: new Uint32Array(lineIndices),
   };
 };

@@ -6,6 +6,14 @@ import { PixelRatio, View } from "react-native";
 import { Canvas } from "react-native-wgpu";
 import type { CanvasRef } from "react-native-wgpu";
 
+import { useSharedValue } from "react-native-reanimated";
+
+import {
+  Gesture,
+  GestureDetector,
+  GestureHandlerRootView,
+} from "react-native-gesture-handler";
+
 export const WireframeSphere = () => {
   const ref = useRef<CanvasRef>(null);
 
@@ -36,17 +44,37 @@ export const WireframeSphere = () => {
     };
   };
 
+  const offsetsRef = useSharedValue({
+    x: 0,
+    y: 0,
+    rotation: 0,
+  });
+
   useEffect(() => {
     (async () => {
       const config = await configureWebGpu();
-      run(config);
-      
+      run(config, offsetsRef);
     })();
   }, []);
 
+  const pan = Gesture.Pan().onChange(({ absoluteX, absoluteY }) => {
+    offsetsRef.value.x = absoluteX;
+    offsetsRef.value.y = absoluteY;
+  });
+
+  const rotate = Gesture.Rotation().onChange((e) => {
+    offsetsRef.value.rotation = e.rotation;
+  });
+
+  const gesture = Gesture.Race(rotate, pan);
+
   return (
-    <View style={{ backgroundColor: "black", flex: 1 }}>
-      <Canvas ref={ref} style={{ backgroundColor: "red", flex: 1 }} />
-    </View>
+    <GestureHandlerRootView>
+      <GestureDetector gesture={gesture}>
+        <View style={{ backgroundColor: "black", flex: 1 }}>
+          <Canvas ref={ref} style={{ backgroundColor: "red", flex: 1 }} />
+        </View>
+      </GestureDetector>
+    </GestureHandlerRootView>
   );
 };

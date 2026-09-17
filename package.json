@@ -1,6 +1,15 @@
 {
   "main": "expo-router/entry",
   "scripts": {
+    "generate:shaders": "node scripts/generate-shaders.mjs",
+    "generate:demo": "node scripts/generate-demo.mjs",
+    "prepare:assets": "npm run generate:shaders && npm run generate:demo",
+    "prestart": "npm run prepare:assets",
+    "preandroid": "npm run prepare:assets",
+    "preios": "npm run prepare:assets",
+    "preweb": "npm run prepare:assets",
+    "predeploy": "npm run prepare:assets",
+    "eas-build-post-install": "npm run prepare:assets",
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
@@ -10,6 +19,9 @@
   "dependencies": {
     "@react-three/fiber": "^9.4.0",
     "expo": "^54.0.1",
+    "expo-asset": "~12.0.9",
+    "expo-document-picker": "~14.0.8",
+    "expo-file-system": "~19.0.21",
     "expo-constants": "~18.0.8",
     "expo-linking": "~8.0.7",
     "expo-router": "~6.0.0",
@@ -24,7 +36,7 @@
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",
     "react-native-web": "^0.21.0",
-    "react-native-wgpu": "^0.4.1",
+    "react-native-wgpu": "0.4.2",
     "react-native-worklets": "0.5.1",
     "three": "0.172.0",
     "wgpu-matrix": "^3.0.2"

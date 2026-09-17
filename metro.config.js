@@ -1,11 +1,12 @@
 const { getDefaultConfig } = require("expo/metro-config");
 
 const config = getDefaultConfig(__dirname);
+config.resolver.assetExts.push("ply", "splat");
 
 // These are all positive changes that enforce a more standard WebGPU-compatible three.js build.
 config.resolver.resolveRequest = (context, moduleName, platform) => {
   // Force 'three' to webgpu build
-  if (moduleName.startsWith("three")) {
+  if (moduleName === "three" || moduleName === "three/webgpu") {
     moduleName = "three/webgpu";
   }
 

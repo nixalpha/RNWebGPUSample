@@ -1,5 +1,6 @@
 {
   "expo": {
+    "newArchEnabled": true,
     "scheme": "acme",
     "userInterfaceStyle": "automatic",
     "orientation": "default",

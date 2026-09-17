@@ -1,8 +1,7 @@
-import { makeWebGPURenderer } from "@/lib/make-webgpu-renderer";
 import { run } from "@/webgpu/sphere-wireframe";
 import { WebGPUConfig } from "@/webgpu/types";
-import React, { useEffect, useRef } from "react";
-import { PixelRatio, View } from "react-native";
+import React, { useEffect, useRef, useState } from "react";
+import { Text, View } from "react-native";
 import { Canvas } from "react-native-wgpu";
 import type { CanvasRef } from "react-native-wgpu";
 
@@ -16,9 +15,11 @@ import {
 
 export const WireframeSphere = () => {
   const ref = useRef<CanvasRef>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const configureWebGpu = async (): Promise<WebGPUConfig> => {
     const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error("No WebGPU adapter available.");
     const device = await adapter!.requestDevice();
     const context = ref.current!.getContext("webgpu")!;
     const format = navigator.gpu.getPreferredCanvasFormat();
@@ -51,10 +52,24 @@ export const WireframeSphere = () => {
   });
 
   useEffect(() => {
-    (async () => {
-      const config = await configureWebGpu();
-      run(config, offsetsRef);
-    })();
+    const abort = new AbortController();
+    let config: WebGPUConfig | undefined;
+    let stop: (() => void) | undefined;
+    void (async () => {
+      config = await configureWebGpu();
+      if (abort.signal.aborted) { config.device.destroy(); return; }
+      stop = await run(config, offsetsRef, abort.signal);
+      if (abort.signal.aborted) { stop(); config.device.destroy(); }
+    })().catch((reason) => {
+      if (!abort.signal.aborted) setError(String(reason));
+      config?.device.destroy();
+    });
+    return () => {
+      abort.abort();
+      stop?.();
+      config?.context.unconfigure();
+      config?.device.destroy();
+    };
   }, []);
 
   const pan = Gesture.Pan().onChange(({ absoluteX, absoluteY }) => {
@@ -69,7 +84,8 @@ export const WireframeSphere = () => {
   const gesture = Gesture.Race(rotate, pan);
 
   return (
-    <GestureHandlerRootView>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      {error && <Text style={{ color: "red", padding: 16 }}>{error}</Text>}
       <GestureDetector gesture={gesture}>
         <View style={{ backgroundColor: "black", flex: 1 }}>
           <Canvas ref={ref} style={{ backgroundColor: "red", flex: 1 }} />

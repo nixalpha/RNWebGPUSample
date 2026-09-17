@@ -19,9 +19,11 @@ export default function Layout() {
       <Stack.Screen
         name="index"
         options={{
-          title: "WebGPU Sphere",
+          title: "Visionary",
+          headerTransparent: false,
         }}
       />
+      <Stack.Screen name="sphere" options={{ title: "WebGPU diagnostic", headerTransparent: false }} />
     </Stack>
   );
 }

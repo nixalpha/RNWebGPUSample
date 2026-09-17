@@ -1,4 +1,4 @@
-import type { RNCanvasContext } from "react-native-wgpu";
+import type { RNCanvasContext } from "react-native-webgpu";
 import { Platform } from "react-native";
 import { GaussianRenderer } from "../visionary/renderer/gaussian_renderer";
 import { PointCloud } from "../visionary/point_cloud/point_cloud";

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, AppState, PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
-import { Canvas, type CanvasRef } from "react-native-wgpu";
+import { Canvas, type CanvasRef } from "react-native-webgpu";
 import { useFocusEffect, router } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
 import { File, Paths } from "expo-file-system";

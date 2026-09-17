@@ -2,8 +2,8 @@ import { run } from "@/webgpu/sphere-wireframe";
 import { WebGPUConfig } from "@/webgpu/types";
 import React, { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { Canvas } from "react-native-wgpu";
-import type { CanvasRef } from "react-native-wgpu";
+import { Canvas } from "react-native-webgpu";
+import type { CanvasRef } from "react-native-webgpu";
 
 import { useSharedValue } from "react-native-reanimated";
 

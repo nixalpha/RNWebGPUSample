@@ -1,4 +1,4 @@
-import { RNCanvasContext } from "react-native-wgpu";
+import { RNCanvasContext } from "react-native-webgpu";
 
 
 export interface WebGPUConfig {

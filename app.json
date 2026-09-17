@@ -1,6 +1,5 @@
 {
   "expo": {
-    "newArchEnabled": true,
     "scheme": "acme",
     "userInterfaceStyle": "automatic",
     "orientation": "default",
@@ -9,7 +8,19 @@
     },
     "plugins": [
       "expo-router",
-      "./plugins/with-ios-webgpu"
+      "./plugins/with-ios-webgpu",
+      "expo-asset",
+      "expo-splash-screen",
+      "expo-status-bar",
+      "expo-build-properties",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "enableSceneSupport": true
+          }
+        }
+      ]
     ],
     "name": "WebGPUSample",
     "slug": "WebGPUSample",

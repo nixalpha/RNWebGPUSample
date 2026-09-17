@@ -1,6 +1,6 @@
-export const MAX_POINTS = 250_000;
-export const MAX_FILE_BYTES = 128 * 1024 * 1024;
-export const MAX_GPU_BYTES = 128 * 1024 * 1024;
+export const MAX_POINTS = 500_000;
+export const MAX_FILE_BYTES = 256 * 1024 * 1024;
+export const MAX_GPU_BYTES = 256 * 1024 * 1024;
 export const SORT_WORKGROUP_STORAGE = (256 + 15 * 256 + 256) * 4;
 
 // Mirrors radix_sort.ts, including its safety padding and both projected buffers.

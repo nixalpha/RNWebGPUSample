@@ -3,6 +3,7 @@
 import { vec3 } from "gl-matrix";
 import { UniformBuffer } from '../uniform/uniform_buffer';
 import { Aabb } from "../utils/aabb";
+import { uploadBuffer } from "../utils/upload-buffer";
 import type { GaussianDataSource as GenericGaussianPointCloudTS } from "../io/types";
 import type { SplatBuffer } from "./splat_buffer";
 import { getBindGroupLayout, getRenderBindGroupLayout, BUFFER_CONFIG } from "./layouts";
@@ -113,14 +114,14 @@ export class PointCloud {
         size: pc.gaussianBuffer().byteLength,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       });
-      device.queue.writeBuffer(this.gaussianBufferGPU, 0, pc.gaussianBuffer());
+      uploadBuffer(device.queue, this.gaussianBufferGPU, pc.gaussianBuffer());
 
       this.shBufferGPU = this.createBuffer(device, {
         label: "sh/storage",
         size: pc.shCoefsBuffer().byteLength,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       });
-      device.queue.writeBuffer(this.shBufferGPU, 0, pc.shCoefsBuffer());
+      uploadBuffer(device.queue, this.shBufferGPU, pc.shCoefsBuffer());
     }
 
     // 2D splat buffer (projected attributes + sort keys). Size depends on pipeline; allocate numPoints * stride.

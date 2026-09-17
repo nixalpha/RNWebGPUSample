@@ -8,7 +8,8 @@
       "output": "single"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      "./plugins/with-ios-webgpu"
     ],
     "name": "WebGPUSample",
     "slug": "WebGPUSample",

@@ -13,6 +13,10 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "preios:device": "npm run prepare:assets",
+    "ios:device": "expo run:ios --device",
+    "ios:prebuild": "npm run prepare:assets && expo prebuild --platform ios --no-install --skip-dependency-update react,react-native",
+    "ios:pods": "cd ios && pod install",
     "web": "expo start --web",
     "deploy": "npx expo export -p web && npx eas-cli@latest deploy"
   },

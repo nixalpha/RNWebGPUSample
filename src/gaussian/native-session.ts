@@ -1,4 +1,5 @@
 import type { RNCanvasContext } from "react-native-wgpu";
+import { Platform } from "react-native";
 import { GaussianRenderer } from "../visionary/renderer/gaussian_renderer";
 import { PointCloud } from "../visionary/point_cloud/point_cloud";
 import { allocationSizes, estimateGpuBytes, MAX_POINTS, SORT_WORKGROUP_STORAGE, validateGpuAllocation } from "../visionary/memory";
@@ -21,6 +22,8 @@ export class NativeGaussianSession {
   private abort?: AbortController;
   private loadTask: Promise<void> = Promise.resolve();
   private viewport: [number, number] = [1, 1];
+  private hasLayout = false;
+  private configured = false;
   private logicalHeight = 1;
   private frameTimes: number[] = [];
   private lastFrame = 0;
@@ -40,7 +43,9 @@ export class NativeGaussianSession {
     try {
       const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
       if (this.disposed) return;
-      if (!adapter) throw new Error("No WebGPU adapter is available. Use a physical Vulkan-capable Android device.");
+      if (!adapter) throw new Error(Platform.OS === "ios"
+        ? "No WebGPU adapter is available. Use a Metal-capable iOS device or supported simulator with Metal API Validation disabled."
+        : "No WebGPU adapter is available. Use a physical Vulkan-capable Android device.");
       const required = { maxComputeInvocationsPerWorkgroup: 256, maxComputeWorkgroupSizeX: 256,
         maxComputeWorkgroupStorageSize: SORT_WORKGROUP_STORAGE, maxBindGroups: 4, maxStorageBuffersPerShaderStage: 7 };
       for (const [name, value] of Object.entries(required)) {
@@ -81,12 +86,7 @@ export class NativeGaussianSession {
       } });
     } catch (error) {
       if (!this.disposed) this.fail(error instanceof Error ? error.message : String(error));
-      this.renderer?.dispose();
-      if (this.device) {
-        this.device.removeEventListener?.("uncapturederror", this.onGpuError);
-        this.context.unconfigure();
-        this.device.destroy();
-      }
+      this.destroyResources();
       throw error;
     }
   }
@@ -96,31 +96,42 @@ export class NativeGaussianSession {
   };
 
   private configure(): void {
-    if (this.device && this.format && !this.disposed && !this.failed) {
+    if (this.device && this.format && this.active && this.hasLayout && !this.configured && !this.disposed && !this.failed) {
+      this.context.canvas.width = this.viewport[0];
+      this.context.canvas.height = this.viewport[1];
+      this.orbit.resize(...this.viewport);
       this.context.configure({ device: this.device, format: this.format, alphaMode: "opaque",
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+      this.configured = true;
     }
   }
 
   resize(width: number, height: number, pixelRatio: number, quality: Quality): void {
-    if (this.disposed || width <= 0 || height <= 0) return;
+    if (this.disposed) return;
+    if (width <= 0 || height <= 0) {
+      this.hasLayout = false;
+      this.configured = false;
+      this.stopFrames();
+      return;
+    }
+    const hadLayout = this.hasLayout;
+    this.hasLayout = true;
     const scale = Math.min(pixelRatio, 1280 / Math.max(width, height)) * quality;
     const next: [number, number] = [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))];
     this.logicalHeight = height;
-    if (next[0] === this.viewport[0] && next[1] === this.viewport[1]) return;
+    if (hadLayout && next[0] === this.viewport[0] && next[1] === this.viewport[1]) return;
     this.viewport = next;
+    this.configured = false;
     try {
-      this.context.canvas.width = next[0];
-      this.context.canvas.height = next[1];
-      this.orbit.resize(...next);
       this.configure();
+      this.startFrames();
     } catch (error) { this.fail(error instanceof Error ? error.message : String(error)); }
   }
 
   setActive(active: boolean): void {
     if (this.disposed || this.failed) return;
     this.active = active;
-    if (!active) this.stopFrames();
+    if (!active) { this.stopFrames(); this.configured = false; }
     else {
       try { this.configure(); this.startFrames(); }
       catch (error) { this.fail(error instanceof Error ? error.message : String(error)); }
@@ -157,8 +168,9 @@ export class NativeGaussianSession {
         if (!this.device || !this.renderer || this.disposed || this.failed) return;
         validateGpuAllocation(data.numPoints(), this.device.limits);
         this.onStatus({ phase: "loading", message: "Uploading Gaussians", progress: 1 });
-        this.device.pushErrorScope("out-of-memory");
-        this.device.pushErrorScope("validation");
+        const device = this.device;
+        device.pushErrorScope("out-of-memory");
+        device.pushErrorScope("validation");
         try {
           cloud = new PointCloud(this.device, data);
           // Allocate the scene's buffers and encode once inside the error scopes.
@@ -167,8 +179,8 @@ export class NativeGaussianSession {
           this.orbit.fit(cloud.bbox);
           if (this.active) this.draw();
         } finally {
-          const validation = await this.device.popErrorScope();
-          const memory = await this.device.popErrorScope();
+          const validation = await device.popErrorScope();
+          const memory = await device.popErrorScope();
           if (validation || memory) throw new Error((validation ?? memory)!.message);
         }
         throwIfAborted(abort.signal);
@@ -176,7 +188,7 @@ export class NativeGaussianSession {
         this.onStatus({ phase: "ready", message: source.name, pointCount: data.numPoints(),
           estimatedGpuBytes: estimateGpuBytes(data.numPoints()), loadMilliseconds: performance.now() - started });
       } catch (error) {
-        cloud?.dispose();
+        this.cleanup(() => cloud?.dispose());
         this.releaseScene();
         if (!this.disposed && !this.failed && !abort.signal.aborted) this.onStatus({ phase: "error", message: error instanceof Error ? error.message : String(error) });
       } finally {
@@ -196,7 +208,7 @@ export class NativeGaussianSession {
   }
 
   private draw(): void {
-    if (!this.device || !this.renderer || !this.clouds.length || this.disposed || this.failed) return;
+    if (!this.device || !this.renderer || !this.clouds.length || !this.active || !this.configured || this.disposed || this.failed) return;
     const encoder = this.device.createCommandEncoder({ label: "Gaussian frame" });
     this.renderer.prepareMulti(encoder, this.device.queue, this.clouds, { camera: this.orbit.camera, viewport: this.viewport });
     const pass = encoder.beginRenderPass({ colorAttachments: [{
@@ -209,7 +221,7 @@ export class NativeGaussianSession {
   }
 
   private clear(): void {
-    if (!this.device || !this.active || this.disposed || this.failed) return;
+    if (!this.device || !this.active || !this.configured || this.disposed || this.failed) return;
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.context.getCurrentTexture().createView(),
       loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }] });
@@ -219,7 +231,7 @@ export class NativeGaussianSession {
   }
 
   private startFrames(): void {
-    if (this.frameId !== null || !this.active || this.loading || !this.clouds.length || this.disposed || this.failed) return;
+    if (this.frameId !== null || !this.active || !this.configured || this.loading || !this.clouds.length || this.disposed || this.failed) return;
     this.lastFrame = 0;
     this.frameTimes = [];
     this.lastStats = performance.now();
@@ -228,7 +240,7 @@ export class NativeGaussianSession {
 
   private readonly frame = (time: number): void => {
     this.frameId = null;
-    if (this.disposed || this.failed || !this.active || this.loading || !this.clouds.length) return;
+    if (this.disposed || this.failed || !this.active || !this.configured || this.loading || !this.clouds.length) return;
     try {
       this.draw();
       if (this.lastFrame) this.frameTimes.push(time - this.lastFrame);
@@ -252,9 +264,28 @@ export class NativeGaussianSession {
   }
 
   private releaseScene(): void {
-    for (const cloud of this.clouds) cloud.dispose();
+    for (const cloud of this.clouds) this.cleanup(() => cloud.dispose());
     this.clouds = [];
-    this.renderer?.releaseScene();
+    this.cleanup(() => this.renderer?.releaseScene());
+  }
+
+  private cleanup(action: () => void): void {
+    try { action(); } catch (error) { console.warn("WebGPU cleanup failed", error); }
+  }
+
+  private destroyResources(): void {
+    this.releaseScene();
+    this.cleanup(() => this.renderer?.dispose());
+    this.renderer = undefined;
+    const device = this.device;
+    this.device = undefined;
+    this.configured = false;
+    if (device) {
+      this.cleanup(() => device.removeEventListener?.("uncapturederror", this.onGpuError));
+      // A detached Metal surface must not prevent the device from being freed.
+      this.cleanup(() => this.context.unconfigure());
+      this.cleanup(() => device.destroy());
+    }
   }
 
   private fail(message: string): void {
@@ -270,12 +301,6 @@ export class NativeGaussianSession {
     this.disposed = true;
     this.abort?.abort();
     this.stopFrames();
-    this.releaseScene();
-    this.renderer?.dispose();
-    if (this.device) {
-      this.device.removeEventListener?.("uncapturederror", this.onGpuError);
-      this.context.unconfigure();
-      this.device.destroy();
-    }
+    this.destroyResources();
   }
 }

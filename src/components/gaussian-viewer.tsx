@@ -33,15 +33,29 @@ export function GaussianViewer({ source = DEMO, onStatus }: GaussianViewerProps)
   const [focused, setFocused] = useState(false);
   const [foreground, setForeground] = useState(AppState.currentState === "active");
   const [picking, setPicking] = useState(false);
+  const [pickerError, setPickerError] = useState<string | null>(null);
   const mounted = useRef(true);
   const ownedCacheFiles = useRef(new Set<string>());
+  const readers = useRef(new Map<string, number>());
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const statusCallback = useRef(onStatus);
   statusCallback.current = onStatus;
   const insets = useSafeAreaInsets();
-  const active = focused && foreground;
+  const active = focused && foreground && !picking;
   const activeRef = useRef(active);
   activeRef.current = active;
   const readyForCanvas = layout.width > 0 && layout.height > 0;
+
+  const pruneCache = useCallback(() => {
+    const keep = mounted.current && selectedRef.current.kind === "file" ? selectedRef.current.uri : undefined;
+    for (const uri of ownedCacheFiles.current) {
+      if (uri === keep || readers.current.has(uri)) continue;
+      try { const file = new File(uri); if (file.exists) file.delete(); }
+      catch { continue; } // Retry later if a provider/OS temporarily holds the file.
+      ownedCacheFiles.current.delete(uri);
+    }
+  }, []);
 
   const report = useCallback((next: ViewerStatus) => {
     if (!mounted.current) return;
@@ -52,12 +66,12 @@ export function GaussianViewer({ source = DEMO, onStatus }: GaussianViewerProps)
   useEffect(() => { setSelected(source); }, [source]);
   useFocusEffect(useCallback(() => {
     setFocused(true);
-    return () => { setFocused(false); sessionRef.current?.setActive(false); };
+    return () => { activeRef.current = false; setFocused(false); sessionRef.current?.setActive(false); };
   }, []));
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
       // Stop immediately; do not wait for React's next effect to reach the surface.
-      if (state !== "active") sessionRef.current?.setActive(false);
+      if (state !== "active") { activeRef.current = false; sessionRef.current?.setActive(false); }
       setForeground(state === "active");
     });
     return () => subscription.remove();
@@ -66,12 +80,9 @@ export function GaussianViewer({ source = DEMO, onStatus }: GaussianViewerProps)
     mounted.current = true;
     return () => {
       mounted.current = false;
-      for (const uri of ownedCacheFiles.current) {
-        try { const file = new File(uri); if (file.exists) file.delete(); } catch { /* OS may have cleared its cache. */ }
-      }
-      ownedCacheFiles.current.clear();
+      pruneCache(); // Pending reads release their files when their load promises settle.
     };
-  }, []);
+  }, [pruneCache]);
 
   useEffect(() => {
     if (!readyForCanvas) return;
@@ -120,8 +131,20 @@ export function GaussianViewer({ source = DEMO, onStatus }: GaussianViewerProps)
   useEffect(() => { session?.resize(layout.width, layout.height, PixelRatio.get(), quality); }, [session, layout, quality]);
   useEffect(() => { session?.setActive(active); }, [session, active]);
   useEffect(() => {
-    if (session) { setStats(null); void session.load(selected); }
-  }, [session, selected]);
+    if (!session) return;
+    setStats(null);
+    const uri = selected.kind === "file" ? selected.uri : undefined;
+    if (uri) readers.current.set(uri, (readers.current.get(uri) ?? 0) + 1);
+    const release = () => {
+      if (uri) {
+        const remaining = (readers.current.get(uri) ?? 1) - 1;
+        if (remaining) readers.current.set(uri, remaining);
+        else readers.current.delete(uri);
+      }
+      pruneCache();
+    };
+    void session.load(selected).then(release, release);
+  }, [session, selected, pruneCache]);
 
   const gestures = useMemo(() => {
     let orbitX = 0, orbitY = 0, panX = 0, panY = 0, scale = 1;
@@ -143,30 +166,36 @@ export function GaussianViewer({ source = DEMO, onStatus }: GaussianViewerProps)
   }, []);
 
   const pick = async () => {
+    activeRef.current = false;
+    sessionRef.current?.setActive(false);
     setPicking(true);
+    setPickerError(null);
     try {
       // Android providers frequently label PLY/SPLAT as application/octet-stream.
       const result = await DocumentPicker.getDocumentAsync({ type: "*/*", multiple: false, copyToCacheDirectory: true });
       if (result.canceled) return;
       const asset = result.assets[0];
-      const isOwnCache = asset.uri.startsWith(Paths.cache.uri);
+      const isOwnCache = asset.uri.startsWith(`${Paths.cache.uri.replace(/\/$/, "")}/`);
       if (isOwnCache) ownedCacheFiles.current.add(asset.uri);
       if (!mounted.current) {
         if (isOwnCache) { try { new File(asset.uri).delete(); } catch {} }
         return;
       }
       if (!/\.(ply|splat)$/i.test(asset.name) || /\.compressed\.ply$/i.test(asset.name)) {
-        report({ phase: "error", message: "Choose a standard Gaussian .ply or .splat file." });
-        return;
+        throw new Error("Choose a standard Gaussian .ply or .splat file.");
       }
       if (asset.size !== undefined && asset.size > MAX_FILE_BYTES) {
-        report({ phase: "error", message: "Choose a file smaller than 128 MiB." });
-        return;
+        throw new Error("Choose a file smaller than 128 MiB.");
       }
-      setSelected({ kind: "file", uri: asset.uri, name: asset.name, size: asset.size });
+      const file = new File(asset.uri);
+      if (!file.exists) throw new Error("The file provider could not copy this file. Download it in Files and choose it again.");
+      if (file.size > MAX_FILE_BYTES) throw new Error("Choose a file smaller than 128 MiB.");
+      const next: SceneSource = { kind: "file", uri: asset.uri, name: asset.name, size: file.size };
+      selectedRef.current = next;
+      setSelected(next);
     } catch (error) {
-      report({ phase: "error", message: error instanceof Error ? error.message : String(error) });
-    } finally { if (mounted.current) setPicking(false); }
+      if (mounted.current) setPickerError(error instanceof Error ? error.message : String(error));
+    } finally { pruneCache(); if (mounted.current) setPicking(false); }
   };
 
   const busy = status.phase === "initializing" || status.phase === "loading";
@@ -190,6 +219,10 @@ export function GaussianViewer({ source = DEMO, onStatus }: GaussianViewerProps)
           {button("Reset camera", () => session?.resetCamera(), !session)}
         </View>
       </View>
+      {pickerError && <View style={styles.header} accessibilityLiveRegion="polite">
+        <Text style={styles.message}>{pickerError}</Text>
+        {button("Dismiss", () => setPickerError(null))}
+      </View>}
       <GestureDetector gesture={gestures}>
         <View style={styles.viewport} onLayout={({ nativeEvent }) => {
           const { width, height } = nativeEvent.layout;

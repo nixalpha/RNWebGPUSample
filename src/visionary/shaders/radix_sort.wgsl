@@ -2,12 +2,11 @@
 // Replaces the original decoupled look-back (cross-workgroup spin-wait) with a 3-phase scatter:
 //   Phase 1 (scatter_local): each workgroup computes local histogram + match/rank, writes reduction
 //   Phase 2 (scatter_prefix_pass): a single-workgroup pass scans all partition reductions
-//   Phase 3 (scatter_apply): each workgroup reads precomputed prefix, reorders and scatters globally
+//   Phase 3 (scatter_apply): each workgroup reads precomputed prefix and scatters directly
 
 // Constants prepended by TypeScript before pipeline creation:
 // const histogram_sg_size, histogram_wg_size, rs_radix_log2, rs_radix_size
 // const rs_keyval_size, rs_histogram_block_rows, rs_scatter_block_rows
-// const rs_mem_dwords, rs_mem_sweep_0_offset, rs_mem_sweep_1_offset, rs_mem_sweep_2_offset
 
 struct GeneralInfo{
     keys_size: u32,
@@ -57,8 +56,9 @@ fn zero_histograms(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_
     // Zero: histograms + partitions + prefix areas
     var n = (rs_keyval_size + actual_wgs * 2u) * histo_size;
     let b = n;
-    if infos.keys_size < infos.padded_size {
-        n += infos.padded_size - infos.keys_size;
+    let padded_size = max(infos.padded_size, actual_wgs * scatter_block_kvs);
+    if infos.keys_size < padded_size {
+        n += padded_size - infos.keys_size;
     }
     
     let line_size = nwg.x * {histogram_wg_size}u;
@@ -172,7 +172,6 @@ fn prefix_histogram(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invoca
 // ============================================================================
 // SCATTER - 3-phase deadlock-free approach
 // ============================================================================
-var<workgroup> scatter_smem: array<u32, rs_mem_dwords>;
 var<private> kr : array<u32, rs_scatter_block_rows>;
 var<private> pv : array<u32, rs_scatter_block_rows>;
 
@@ -257,22 +256,24 @@ fn accumulate_wg_histogram(pass_: u32, lid_x: u32) {
     zero_smem(lid_x);
     workgroupBarrier();
 
+    // Read the old count on every matching lane before the last lane updates it.
+    // Atomics do not synchronize lanes. Keep both barriers in uniform control flow.
     for (var i = 0u; i < subgroup_count; i++) {
-        if subgroup_id == i {
-            for (var j = 0u; j < rs_scatter_block_rows; j++) {
-                let v = bitcast<u32>(kv[j]);
-                let digit = extractBits(v, pass_ * rs_radix_log2, rs_radix_log2);
-                let prev = histogram_load(digit);
-                let rank = kr[j] & 0xFFFFu;
-                let count = kr[j] >> 16u;
+        for (var j = 0u; j < rs_scatter_block_rows; j++) {
+            let digit = extractBits(kv[j], pass_ * rs_radix_log2, rs_radix_log2);
+            let rank = kr[j] & 0xFFFFu;
+            let count = kr[j] >> 16u;
+            var prev = 0u;
+            if subgroup_id == i {
+                prev = histogram_load(digit);
                 kr[j] = prev + rank;
-
-                if rank == count {
-                    histogram_store(digit, (prev + count));
-                }
-            }            
+            }
+            workgroupBarrier();
+            if subgroup_id == i && rank == count {
+                histogram_store(digit, prev + count);
+            }
+            workgroupBarrier();
         }
-        workgroupBarrier();
     }
 }
 
@@ -361,105 +362,18 @@ fn scatter_prefix_pass(@builtin(local_invocation_id) lid: vec3<u32>) {
 }
 
 // ---- PHASE 3: scatter_apply ----
-// Each workgroup re-reads its data, re-computes match/rank (cheap), reads its precomputed prefix,
-// does local reorder through scatter_smem, and writes to global output.
+// Each workgroup re-reads its data, recomputes stable ranks, and writes directly
+// to global output using its precomputed bucket prefixes.
 
 fn scatter_apply_core(pass_: u32, lid: vec3<u32>, wid: vec3<u32>, nwg: vec3<u32>) {
-    // Use nwg.x from the dispatch — same dispatch buffer as scatter_local, so same workgroup count
-    let num_wgs = nwg.x;
-    
-    // Re-compute match/rank from the same data
     compute_match_rank(pass_, lid.x);
-    
-    // Read precomputed exclusive prefix for this workgroup into scatter_smem[0..255]
-    let pref_base = prefix_base_offset(num_wgs);
-    if lid.x < rs_radix_size {
-        let pref_idx = pref_base + wid.x * rs_radix_size + lid.x;
-        scatter_smem[lid.x] = atomicLoad(&histograms[pref_idx]);
-    }
-    workgroupBarrier();
-
-    // Re-accumulate workgroup histogram in smem (needed for local prefix scan)
-    let subgroup_id = lid.x / histogram_sg_size;
-    let subgroup_count = {scatter_wg_size}u / histogram_sg_size;
-
-    zero_smem(lid.x);
-    workgroupBarrier();
-
-    for (var i = 0u; i < subgroup_count; i++) {
-        if subgroup_id == i {
-            for (var j = 0u; j < rs_scatter_block_rows; j++) {
-                let v = bitcast<u32>(kv[j]);
-                let digit = extractBits(v, pass_ * rs_radix_log2, rs_radix_log2);
-                let prev = histogram_load(digit);
-                let rank = kr[j] & 0xFFFFu;
-                let count = kr[j] >> 16u;
-                kr[j] = prev + rank;
-
-                if rank == count {
-                    histogram_store(digit, (prev + count));
-                }
-            }
-        }
-        workgroupBarrier();
-    }
-
-    // Local prefix scan of workgroup histogram
-    prefix_reduce_smem(lid.x);
-    workgroupBarrier();
-
-    // Convert rank to local index
+    accumulate_wg_histogram(pass_, lid.x);
+    let pref_base = prefix_base_offset(nwg.x) + wid.x * rs_radix_size;
+    // Write directly from each lane's registers. No shared-memory key/payload
+    // transpose is necessary: the stable local rank already identifies its slot.
     for (var i = 0u; i < rs_scatter_block_rows; i++) {
-        let v = bitcast<u32>(kv[i]);
-        let digit = extractBits(v, pass_ * rs_radix_log2, rs_radix_log2);
-        let exc = histogram_load(digit);
-        let idx = exc + kr[i];
-        kr[i] |= (idx << 16u);
-    }
-    workgroupBarrier();
-    
-    // Reorder through scatter_smem
-    let smem_reorder_offset = rs_radix_size;
-    let smem_base = smem_reorder_offset + lid.x;
-
-    // Reorder keys
-    for (var j = 0u; j < rs_scatter_block_rows; j++) {
-        let smem_idx = smem_reorder_offset + (kr[j] >> 16u) - 1u;
-        scatter_smem[smem_idx] = bitcast<u32>(kv[j]);
-    }
-    workgroupBarrier();
-    for (var j = 0u; j < rs_scatter_block_rows; j++) {
-        kv[j] = scatter_smem[smem_base + j * {scatter_wg_size}u];
-    }
-    workgroupBarrier();
-
-    // Reorder payloads
-    for (var j = 0u; j < rs_scatter_block_rows; j++) {
-        let smem_idx = smem_reorder_offset + (kr[j] >> 16u) - 1u;
-        scatter_smem[smem_idx] = pv[j];
-    }
-    workgroupBarrier();
-    for (var j = 0u; j < rs_scatter_block_rows; j++) {
-        pv[j] = scatter_smem[smem_base + j * {scatter_wg_size}u];
-    }
-    workgroupBarrier();
-
-    // Reorder ranks
-    for (var i = 0u; i < rs_scatter_block_rows; i++) {
-        let smem_idx = smem_reorder_offset + (kr[i] >> 16u) - 1u;
-        scatter_smem[smem_idx] = kr[i];
-    }
-    workgroupBarrier();
-    for (var i = 0u; i < rs_scatter_block_rows; i++) {
-        kr[i] = scatter_smem[smem_base + i * {scatter_wg_size}u] & 0xFFFFu;
-    }
-    
-    // Convert local index to global index using precomputed exclusive prefix
-    for (var i = 0u; i < rs_scatter_block_rows; i++) {
-        let v = bitcast<u32>(kv[i]);
-        let digit = extractBits(v, pass_ * rs_radix_log2, rs_radix_log2);
-        let exc = scatter_smem[digit];
-        kr[i] += exc - 1u;
+        let digit = extractBits(kv[i], pass_ * rs_radix_log2, rs_radix_log2);
+        kr[i] = atomicLoad(&histograms[pref_base + digit]) + kr[i] - 1u;
     }
 }
 

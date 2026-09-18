@@ -1,7 +1,8 @@
 export const MAX_POINTS = 500_000;
 export const MAX_FILE_BYTES = 256 * 1024 * 1024;
 export const MAX_GPU_BYTES = 256 * 1024 * 1024;
-export const SORT_WORKGROUP_STORAGE = (256 + 15 * 256 + 256) * 4;
+// The direct scatter path only uses the 256-entry shared histogram.
+export const SORT_WORKGROUP_STORAGE = 256 * 4;
 
 // Mirrors radix_sort.ts, including its safety padding and both projected buffers.
 export function allocationSizes(count: number): number[] {
@@ -9,7 +10,7 @@ export function allocationSizes(count: number): number[] {
   const padded = (Math.floor((count + partition) / partition) + 1) * partition;
   const histogram = (4 + (Math.ceil(count / partition) + 1) * 2) * 256 * 4;
   return [count * 20, count * 96, count * 32, count * 32,
-    padded * 4, padded * 4, count * 4, count * 4, histogram,
+    padded * 4, padded * 4, padded * 4, padded * 4, histogram,
     16, 128, 20, 12, 16, 272, 80, 272, 80];
 }
 

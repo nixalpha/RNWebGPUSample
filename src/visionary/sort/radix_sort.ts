@@ -195,16 +195,6 @@ export class GPURSSorter implements ISorter {
     private processShaderTemplate(shaderCode: string): string {
         const histogram_sg_size = Math.max(1, this.subgroupSize | 0);
 
-        const rs_sweep_0_size = Math.floor(RS_RADIX_SIZE / histogram_sg_size);
-        const rs_sweep_1_size = Math.floor(rs_sweep_0_size / histogram_sg_size);
-        const rs_sweep_2_size = Math.floor(rs_sweep_1_size / histogram_sg_size);
-
-        const rs_smem_phase_2 = RS_RADIX_SIZE + RS_SCATTER_BLOCK_ROWS * SCATTER_WG_SIZE;
-        const rs_mem_dwords = rs_smem_phase_2;
-        const rs_mem_sweep_0_offset = 0;
-        const rs_mem_sweep_1_offset = rs_mem_sweep_0_offset + rs_sweep_0_size;
-        const rs_mem_sweep_2_offset = rs_mem_sweep_1_offset + rs_sweep_1_size;
-        
         const constantDefinitions = `const histogram_sg_size: u32 = ${histogram_sg_size}u;
             const histogram_wg_size: u32 = ${HISTOGRAM_WG_SIZE}u;
             const rs_radix_log2: u32 = ${RS_RADIX_LOG2}u;
@@ -212,10 +202,6 @@ export class GPURSSorter implements ISorter {
             const rs_keyval_size: u32 = ${RS_KEYVAL_SIZE}u;
             const rs_histogram_block_rows: u32 = ${RS_HISTOGRAM_BLOCK_ROWS}u;
             const rs_scatter_block_rows: u32 = ${RS_SCATTER_BLOCK_ROWS}u;
-            const rs_mem_dwords: u32 = ${rs_mem_dwords}u;
-            const rs_mem_sweep_0_offset: u32 = ${rs_mem_sweep_0_offset}u;
-            const rs_mem_sweep_1_offset: u32 = ${rs_mem_sweep_1_offset}u;
-            const rs_mem_sweep_2_offset: u32 = ${rs_mem_sweep_2_offset}u;
             `;
 
         let processedCode = shaderCode
@@ -230,36 +216,69 @@ export class GPURSSorter implements ISorter {
      * Runs a small test sort to verify the current configuration works.
      */
     private async testSort(device: GPUDevice, queue: GPUQueue): Promise<boolean> {
-        const n = 8192;
-        const scrambledData = new Float32Array(
-            Array.from({ length: n }, (_, i) => (i * 4051) % n)
-        );
-        const sortedData = new Float32Array(
-            Array.from({ length: n }, (_, i) => i)
-        ); 
-
-        const sortStuff = this.createSortStuff(device, n);
-
+        const capacity = 8192;
+        // Cover partial blocks, the indirect safety block, zero visible splats,
+        // and stable payload ordering with duplicate keys spanning all four bytes.
+        const cases = [
+            { name: "float/direct", count: capacity, indirect: false, duplicates: false },
+            { name: "float/indirect", count: capacity, indirect: true, duplicates: false },
+            { name: "duplicates/indirect", count: capacity, indirect: true, duplicates: true },
+            { name: "block-boundary/indirect", count: 3840, indirect: true, duplicates: true },
+            { name: "one/indirect", count: 1, indirect: true, duplicates: false },
+            { name: "empty/indirect", count: 0, indirect: true, duplicates: false },
+        ];
+        const sortStuff = this.createSortStuff(device, capacity);
         try {
-        queue.writeBuffer(sortStuff.key_a, 0, scrambledData.buffer);
-
-        const commandEncoder = device.createCommandEncoder({ label: "GPURSSorter test_sort" });
-        this.recordSort(sortStuff, n, commandEncoder);
-        queue.submit([commandEncoder.finish()]);
-
-        await device.queue.onSubmittedWorkDone();
-        
-        const result = await this.downloadBuffer(device, queue, sortStuff.key_a, 'f32');
-
-        for (let i = 0; i < n; i++) {
-            if (result[i] !== sortedData[i]) {
-                console.error(`Sort failed at index ${i}. Expected ${sortedData[i]}, got ${result[i]}`);
-                return false;
+            for (const test of cases) {
+                const floats = new Float32Array(test.count);
+                const input = new Uint32Array(floats.buffer);
+                const payload = Uint32Array.from({ length: test.count }, (_, i) => i);
+                for (let i = 0; i < test.count; i++) {
+                    if (test.duplicates) {
+                        input[i] = Math.imul((i * 4051) % 257, 0x01010101) >>> 0;
+                    } else {
+                        floats[i] = (i * 4051) % capacity;
+                    }
+                }
+                const expected = Array.from(payload).sort((a, b) => input[a] - input[b] || a - b);
+                // Poison unused keys, including the extra indirect block: zero_histograms
+                // must replace them with sentinels on every frame.
+                queue.writeBuffer(sortStuff.key_a, 0, new Uint32Array(sortStuff.key_a.size / 4));
+                queue.writeBuffer(sortStuff.sorter_uni, 0, new Uint32Array([test.count]));
+                if (test.count > 0) {
+                    queue.writeBuffer(sortStuff.key_a, 0, input);
+                    queue.writeBuffer(sortStuff.payload_a, 0, payload);
+                }
+                const encoder = device.createCommandEncoder({ label: test.name });
+                if (test.indirect) {
+                    queue.writeBuffer(sortStuff.sorter_dis, 0,
+                        new Uint32Array([Math.ceil(test.count / 3840) + 1, 1, 1]));
+                    this.recordSortIndirect(sortStuff, sortStuff.sorter_dis, encoder);
+                } else {
+                    this.recordSort(sortStuff, test.count, encoder);
+                }
+                queue.submit([encoder.finish()]);
+                const keys = await this.downloadBuffer(device, queue, sortStuff.key_a, 'u32');
+                const indices = await this.downloadBuffer(device, queue, sortStuff.payload_a, 'u32');
+                for (let i = 0; i < test.count; i++) {
+                    const index = expected[i];
+                    if (keys[i] !== input[index] || indices[i] !== index) {
+                        console.error(
+                            `Sort failed (${test.name}, subgroup ${this.subgroupSize}) at index ${i}: ` +
+                            `expected key/payload ${input[index]}/${index}, got ${keys[i]}/${indices[i]}`
+                        );
+                        return false;
+                    }
+                }
+                if (keys[test.count] !== 0xFFFFFFFF) {
+                    console.error(`Sort failed (${test.name}): padding entered the visible range.`);
+                    return false;
+                }
             }
+            return true;
+        } finally {
+            this.disposeSortStuff(sortStuff);
         }
-
-        return true;
-        } finally { this.disposeSortStuff(sortStuff); }
     }
 
     /**
@@ -433,7 +452,8 @@ export class GPURSSorter implements ISorter {
         if (bytesPerPayloadElem !== 4) {
             console.warn("Currently only 4-byte payloads are fully supported.");
         }
-        const payloadSize = Math.max(1, keysize * bytesPerPayloadElem);
+        // Scatter accesses complete blocks, including sentinel payload entries.
+        const payloadSize = count_ru_histo * bytesPerPayloadElem;
         const payload_a = this.createBuffer(device, {
             label: "Radix payload buffer a",
             size: payloadSize,
